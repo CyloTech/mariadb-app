@@ -1,6 +1,6 @@
 FROM alpine:edge
 
-RUN apk --update add mariadb mariadb-client pwgen && \
+RUN apk --update add mariadb mariadb-client pwgen curl && \
     rm -f /var/cache/apk/*
 
 ADD scripts/run.sh /scripts/run.sh
