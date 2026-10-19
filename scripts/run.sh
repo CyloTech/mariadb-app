@@ -239,14 +239,15 @@ if [ ! -f /etc/app_configured ]; then
 		fi
 	fi
 
-	touch /etc/app_configured
-
-	# Mark the installed callback pending if INSTANCE_ID is set; it is sent
-	# in the background below. ${INSTANCE_ID:+set} keeps the ID (which may
-	# carry the callback token) out of the set -x trace.
+	# Mark the installed callback pending if INSTANCE_ID is set, before the
+	# configured marker so a crash in between cannot lose it. It is sent in
+	# the background below. ${INSTANCE_ID:+set} keeps the ID (which may carry
+	# the callback token) out of the set -x trace.
 	if [ -n "${INSTANCE_ID:+set}" ]; then
 		touch /etc/appbox_callback_pending
 	fi
+
+	touch /etc/app_configured
 fi
 
 # Send a pending installed callback in the background so it can never keep

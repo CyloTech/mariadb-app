@@ -277,4 +277,20 @@ else
     pass "run.sh only marks the callback pending and hands it to the helper"
 fi
 
+# First boot sets the pending flag before the configured marker, so a crash
+# between the two cannot lose the callback.
+# Usage: flag_before_marker <label> <marker path> < script
+flag_before_marker() {
+    local label=$1 marker=$2 text flag_line marker_line
+    text=$(cat)
+    flag_line=$(grep -n 'touch [^ ]*appbox_callback_pending' <<<"${text}" | head -1 | cut -d: -f1)
+    marker_line=$(grep -n "touch ${marker}\$" <<<"${text}" | head -1 | cut -d: -f1)
+    if [[ -n "${flag_line}" && -n "${marker_line}" && "${flag_line}" -lt "${marker_line}" ]]; then
+        pass "${label} sets the pending flag before ${marker}"
+    else
+        fail "${label}: pending flag line ${flag_line:-none}, ${marker} line ${marker_line:-none}"
+    fi
+}
+flag_before_marker "run.sh" /etc/app_configured <"${repo_root}/scripts/run.sh"
+
 exit "${failures}"
