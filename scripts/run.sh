@@ -241,12 +241,23 @@ if [ ! -f /etc/app_configured ]; then
 
 	touch /etc/app_configured
 
-	# Notify API if INSTANCE_ID is set
-	if [ -n "$INSTANCE_ID" ]; then
-		until [[ $(curl -i -H "Accept: application/json" -H "Content-Type:application/json" -X POST "https://api.cylo.io/v1/apps/installed/${INSTANCE_ID}" | grep '200') ]]; do
-			sleep 5
-		done
+	# Mark the installed callback pending if INSTANCE_ID is set; it is sent
+	# in the background below. ${INSTANCE_ID:+set} keeps the ID (which may
+	# carry the callback token) out of the set -x trace.
+	if [ -n "${INSTANCE_ID:+set}" ]; then
+		touch /etc/appbox_callback_pending
 	fi
+fi
+
+# Send a pending installed callback in the background so it can never keep
+# MariaDB from starting. The helper retries network errors, 408, 429 and 5xx
+# and stops on any other status (e.g. 401 once the token was used or cleared).
+if [ -f /etc/appbox_callback_pending ]; then
+	(
+		set +e
+		/usr/local/bin/appbox-installed-callback
+		rm -f /etc/appbox_callback_pending
+	) </dev/null &
 fi
 
 exec mariadbd --user=mysql --console

@@ -47,6 +47,11 @@ COPY --from=mariadb-10-11 /usr/sbin/mariadbd /opt/mariadb/10.11/bin/mariadbd
 ADD scripts/run.sh /scripts/run.sh
 RUN chmod -R 755 /scripts
 
+# Sends POST /v1/apps/installed/${INSTANCE_ID} for run.sh. It retries network
+# errors, 408, 429 and 5xx and stops on any other status.
+COPY appbox-installed-callback /usr/local/bin/appbox-installed-callback
+RUN chmod 755 /usr/local/bin/appbox-installed-callback
+
 ADD sources/my.cnf /etc/mysql/my.cnf
 
 # Clean up APT when done.

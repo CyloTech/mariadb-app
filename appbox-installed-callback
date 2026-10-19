@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# =============================================================================
+# appbox-installed-callback — tell Appbox this instance has finished installing
+# =============================================================================
+#
+# POSTs to https://api.cylo.net/v1/apps/installed/${INSTANCE_ID}. Copy this
+# file into your image (e.g. /usr/local/bin/appbox-installed-callback) and run
+# it in the BACKGROUND, never in front of `exec` or inside cont-init. See
+# "Platform Callback" in AGENTS.md.
+#
+# Usage: appbox-installed-callback [json_body]
+#   json_body  optional request body, e.g. '{"custom_fields":[...]}'
+#
+# RETRIES:
+#   Network errors, 408, 429 and 5xx are retried with backoff (5s doubling to
+#   a 60s cap). Every other status is final: the API only accepts one installed
+#   callback per install or update and rejects the rest (401 once the token has
+#   been used or cleared, 404 for an unknown instance, an error when the
+#   instance is not waiting). Retrying those can never succeed, so the helper
+#   logs the status once and exits.
+#
+# EXIT STATUS: 0 when accepted or skipped, 1 when rejected.
+#
+# ENVIRONMENT:
+#   INSTANCE_ID                  injected by Appbox; may carry ?callback_token=
+#   CALLBACK_TOKEN               injected by Appbox; sent as X-Cylo-Callback-Token
+#   SKIP_APPBOX_CALLBACK=1       skip the callback (local testing)
+#   APPBOX_CALLBACK_BASE         alternate API base URL (tests)
+#   APPBOX_CALLBACK_RETRY_DELAY  first retry delay in seconds (tests)
+#
+# SECRETS: INSTANCE_ID and CALLBACK_TOKEN are credentials. The helper never
+# traces its commands and logs only the numeric instance ID.
+{ set +x; } 2>/dev/null
+set -u
+
+if [[ "${SKIP_APPBOX_CALLBACK:-0}" == "1" ]]; then
+    echo "[appbox-callback] skipped because SKIP_APPBOX_CALLBACK=1"
+    exit 0
+fi
+if [[ -z "${INSTANCE_ID:-}" ]]; then
+    echo "[appbox-callback] INSTANCE_ID is not set; nothing to send" >&2
+    exit 0
+fi
+
+callback_url="${APPBOX_CALLBACK_BASE:-https://api.cylo.net}/v1/apps/installed/${INSTANCE_ID}"
+curl_args=(
+    -sS -o /dev/null -w '%{http_code}'
+    --connect-timeout 10 --max-time 30
+    -H "Accept: application/json"
+    -H "Content-Type: application/json"
+    -X POST
+)
+if [[ -n "${CALLBACK_TOKEN:-}" ]]; then
+    curl_args+=(-H "X-Cylo-Callback-Token: ${CALLBACK_TOKEN}")
+fi
+if [[ $# -gt 0 ]]; then
+    curl_args+=(--data "$1")
+fi
+
+instance_label="${INSTANCE_ID%%\?*}"
+retry_delay="${APPBOX_CALLBACK_RETRY_DELAY:-5}"
+
+while true; do
+    status=$(curl "${curl_args[@]}" "${callback_url}" 2>/dev/null) || status=000
+
+    case "${status}" in
+        2??)
+            echo "[appbox-callback] instance ${instance_label}: installed callback accepted (HTTP ${status})"
+            exit 0
+            ;;
+        000 | 408 | 429 | 5??)
+            echo "[appbox-callback] instance ${instance_label}: installed callback got HTTP ${status}, retrying in ${retry_delay}s" >&2
+            sleep "${retry_delay}"
+            if [[ "${retry_delay}" -lt 60 ]]; then
+                retry_delay=$((retry_delay * 2))
+                [[ "${retry_delay}" -gt 60 ]] && retry_delay=60
+            fi
+            ;;
+        *)
+            echo "[appbox-callback] instance ${instance_label}: installed callback rejected with HTTP ${status}, not retrying" >&2
+            exit 1
+            ;;
+    esac
+done
