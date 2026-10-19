@@ -145,6 +145,18 @@ else
 fi
 stop_mock
 
+# An invalid APPBOX_CALLBACK_RETRY_DELAY falls back to the 5s default.
+start_mock 503,200
+run_limited 20 env INSTANCE_ID="${token_id}" APPBOX_CALLBACK_BASE="http://127.0.0.1:${port}" \
+    APPBOX_CALLBACK_RETRY_DELAY='1;x' "${helper}" >"${work}/output" 2>&1
+rc=$?
+if [[ "${rc}" == 0 ]] && grep -q 'retrying in 5s' "${work}/output" && [[ "$(request_count)" == 2 ]]; then
+    pass "helper ignores an invalid retry delay"
+else
+    fail "helper invalid retry delay exit=${rc} requests=$(request_count)"
+fi
+stop_mock
+
 # Token header, query string and optional body reach the API.
 start_mock 200
 run_limited 20 env INSTANCE_ID="${token_id}" CALLBACK_TOKEN="${header_token}" \

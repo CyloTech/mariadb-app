@@ -26,7 +26,7 @@
 #   CALLBACK_TOKEN               injected by Appbox; sent as X-Cylo-Callback-Token
 #   SKIP_APPBOX_CALLBACK=1       skip the callback (local testing)
 #   APPBOX_CALLBACK_BASE         alternate API base URL (tests)
-#   APPBOX_CALLBACK_RETRY_DELAY  first retry delay in seconds (tests)
+#   APPBOX_CALLBACK_RETRY_DELAY  first retry delay in seconds, 1-60 (tests)
 #
 # SECRETS: INSTANCE_ID and CALLBACK_TOKEN are credentials. The helper never
 # traces its commands and logs only the numeric instance ID.
@@ -59,6 +59,12 @@ fi
 
 instance_label="${INSTANCE_ID%%\?*}"
 retry_delay="${APPBOX_CALLBACK_RETRY_DELAY:-5}"
+case "${retry_delay}" in
+    '' | *[!0-9]* | 0*) retry_delay=5 ;;
+esac
+if [[ "${retry_delay}" -gt 60 ]]; then
+    retry_delay=60
+fi
 
 while true; do
     status=$(curl "${curl_args[@]}" "${callback_url}" 2>/dev/null) || status=000
@@ -71,9 +77,9 @@ while true; do
         000 | 408 | 429 | 5??)
             echo "[appbox-callback] instance ${instance_label}: installed callback got HTTP ${status}, retrying in ${retry_delay}s" >&2
             sleep "${retry_delay}"
-            if [[ "${retry_delay}" -lt 60 ]]; then
-                retry_delay=$((retry_delay * 2))
-                [[ "${retry_delay}" -gt 60 ]] && retry_delay=60
+            retry_delay=$((retry_delay * 2))
+            if [[ "${retry_delay}" -gt 60 ]]; then
+                retry_delay=60
             fi
             ;;
         *)
