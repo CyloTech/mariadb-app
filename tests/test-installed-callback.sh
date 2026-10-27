@@ -7,10 +7,12 @@
 #     callback token carried in INSTANCE_ID;
 #   - scripts/run.sh execs mariadbd straight away even when the API rejects
 #     the callback, sends a pending callback once in the background, clears
-#     the pending flag, keeps the token out of its set -x trace, and sends
+#     the pending flag, keeps the token out of its output, and sends
 #     nothing without INSTANCE_ID or on a plain restart. The data directory
 #     is a scratch directory that already holds an 11.4 database, so no
-#     install or upgrade step runs.
+#     install or upgrade step runs, and the default test account check
+#     (which needs a real server) is stubbed out; scripts/release-gate.py
+#     covers it against the built image.
 #
 # Usage: tests/test-installed-callback.sh
 set -u
@@ -196,7 +198,8 @@ entrypoint_case() {
     local sandbox="${work}/start-script"
     sandbox_start_script "${sandbox}"
     chmod +x "${sandbox}"
-    if ! grep -q '^ *exec "\$@"$' "${sandbox}"; then
+    if ! grep -q '^ *exec "\$@"$' "${sandbox}" \
+        || grep -Fqx 'remove_default_test_account || true' "${sandbox}"; then
         fail "${label}: could not sandbox the start script"
         stop_mock
         return
@@ -253,6 +256,7 @@ sandbox_start_script() {
         -e "s|/usr/local/bin/appbox-installed-callback|${helper}|g" \
         -e "s|https://api\.cylo\.[a-z]*|http://127.0.0.1:${port}|g" \
         -e 's|chown -R mysql:mysql .*|true|' \
+        -e 's#^remove_default_test_account || true$#true#' \
         -e 's|^exec mariadbd --user=mysql --console$|exec "$@"|' \
         "${repo_root}/scripts/run.sh" >"$1"
 }

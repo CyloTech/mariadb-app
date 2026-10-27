@@ -1,6 +1,7 @@
 #!/bin/bash
 
-set -x
+# No `set -x`: the trace printed MYSQL_ROOT_PASSWORD and the other install
+# values into the container log.
 
 # Track if this is a fresh install (no upgrade needed)
 FRESH_INSTALL=0
@@ -104,6 +105,105 @@ run_upgrade_step() {
 }
 
 # ============================================================
+# Remove the default test account
+#
+# Earlier images set MYSQL_DATABASE, MYSQL_USER and MYSQL_PASSWORD to
+# "test", so the first start created 'test'@'%' with the password "test"
+# and ALL on `test`.*, reachable on the published port. On every start,
+# before MariaDB listens on port 3306, this drops 'test'@'%' if it still
+# has that password, then drops the `test` database if it holds no tables,
+# views, routines or events. A test account with any other password, and
+# every other user and database, is left alone.
+#
+# It uses a private server (no network, no grant checks, its own socket),
+# so it needs no root password. A failure is logged and does not stop
+# MariaDB from starting.
+# ============================================================
+
+# mysql_native_password hash of "test"
+DEFAULT_TEST_PASSWORD_HASH='*94BDCEBE19083CE2A1F959FD02F964C7AF4CFC29'
+MAINTENANCE_SOCKET=/run/mysqld/appbox-maintenance.sock
+
+maintenance_sql() {
+	mariadb --no-defaults --protocol=socket --socket="$MAINTENANCE_SOCKET" \
+		--user=root --batch --skip-column-names "$@"
+}
+
+remove_default_test_account() {
+	local server_log server_pid state matched db_exists db_objects drop_sql notice result
+	local waited=0 status=0
+
+	server_log=$(mktemp) || return 1
+	rm -f "$MAINTENANCE_SOCKET"
+
+	mariadbd --user=mysql --skip-grant-tables --skip-networking --skip-slave-start \
+		--socket="$MAINTENANCE_SOCKET" >"$server_log" 2>&1 &
+	server_pid=$!
+	# On a stop request, shut the private server down cleanly first.
+	trap 'kill "$server_pid" 2>/dev/null; wait "$server_pid"; exit 143' TERM INT
+
+	# Allow time for crash recovery on a large database.
+	until mariadb-admin --no-defaults --protocol=socket --socket="$MAINTENANCE_SOCKET" \
+		--connect-timeout=5 --silent ping >/dev/null 2>&1; do
+		if ! kill -0 "$server_pid" 2>/dev/null || [ "$waited" -ge 900 ]; then
+			echo "[!] Could not start MariaDB to check for the default test account; skipping the check"
+			tail -n 20 "$server_log"
+			status=1
+			break
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+
+	if [ "$status" = "0" ]; then
+		state=$(maintenance_sql 2>&1 <<SQL
+SELECT
+  (SELECT COUNT(*) FROM mysql.global_priv
+    WHERE User = 'test' AND Host = '%'
+      AND JSON_VALUE(Priv, '\$.plugin') = 'mysql_native_password'
+      AND JSON_VALUE(Priv, '\$.authentication_string') = '${DEFAULT_TEST_PASSWORD_HASH}'),
+  (SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'test'),
+  (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'test')
+    + (SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = 'test')
+    + (SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = 'test');
+SQL
+)
+		read -r matched db_exists db_objects <<<"$state"
+		if [ -z "$matched" ] || [ -z "$db_exists" ] || [ -z "$db_objects" ] \
+			|| [[ "$matched$db_exists$db_objects" == *[!0-9]* ]]; then
+			echo "[!] Could not check for the default test account: $(head -n 1 <<<"$state")"
+			status=1
+		fi
+	fi
+
+	if [ "$status" = "0" ] && [ "$matched" = "1" ]; then
+		# The user goes first, so a database that cannot be dropped never
+		# keeps the account.
+		drop_sql="FLUSH PRIVILEGES; DROP USER 'test'@'%';"
+		if [ "$db_exists" = "1" ] && [ "$db_objects" = "0" ]; then
+			drop_sql="$drop_sql DROP DATABASE \`test\`;"
+			notice="[i] Removed the default test account 'test'@'%' and its empty test database"
+		elif [ "$db_exists" = "1" ]; then
+			notice="[i] Removed the default test account 'test'@'%'; kept the test database because it is not empty"
+		else
+			notice="[i] Removed the default test account 'test'@'%'"
+		fi
+		if result=$(maintenance_sql -e "$drop_sql" 2>&1); then
+			echo "$notice"
+		else
+			echo "[!] Could not remove the default test account or its empty test database: $(head -n 1 <<<"$result")"
+			status=1
+		fi
+	fi
+
+	kill "$server_pid" 2>/dev/null
+	wait "$server_pid" 2>/dev/null
+	trap - TERM INT
+	rm -f "$MAINTENANCE_SOCKET" "$server_log"
+	return "$status"
+}
+
+# ============================================================
 # Main startup logic
 # ============================================================
 
@@ -131,7 +231,7 @@ else
 
 	if [ "$MYSQL_ROOT_PASSWORD" = "" ]; then
 		MYSQL_ROOT_PASSWORD=$(pwgen 16 1)
-		echo "[i] MySQL root Password: $MYSQL_ROOT_PASSWORD"
+		echo "[i] MYSQL_ROOT_PASSWORD is empty, so root gets a random password (not logged)"
 	fi
 
 	MYSQL_DATABASE=${MYSQL_DATABASE:-""}
@@ -158,8 +258,9 @@ EOF
 	    echo "[i] Creating database: $MYSQL_DATABASE"
 	    echo "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DATABASE\` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;" >> $tfile
 
-	    if [ "$MYSQL_USER" != "" ]; then
-		echo "[i] Creating user: $MYSQL_USER with password $MYSQL_PASSWORD"
+	    # An extra user only when both a name and a password are supplied.
+	    if [ "$MYSQL_USER" != "" ] && [ "$MYSQL_PASSWORD" != "" ]; then
+		echo "[i] Creating user: $MYSQL_USER"
 		echo "CREATE USER IF NOT EXISTS '$MYSQL_USER'@'%' IDENTIFIED BY '$MYSQL_PASSWORD';" >> $tfile
 		echo "GRANT ALL ON \`$MYSQL_DATABASE\`.* TO '$MYSQL_USER'@'%';" >> $tfile
 	    fi
@@ -241,14 +342,17 @@ if [ ! -f /etc/app_configured ]; then
 
 	# Mark the installed callback pending if INSTANCE_ID is set, before the
 	# configured marker so a crash in between cannot lose it. It is sent in
-	# the background below. ${INSTANCE_ID:+set} keeps the ID (which may carry
-	# the callback token) out of the set -x trace.
+	# the background below. ${INSTANCE_ID:+set} avoids expanding the ID,
+	# which may carry the callback token.
 	if [ -n "${INSTANCE_ID:+set}" ]; then
 		touch /etc/appbox_callback_pending
 	fi
 
 	touch /etc/app_configured
 fi
+
+# Every start, before MariaDB listens on port 3306.
+remove_default_test_account || true
 
 # Send a pending installed callback in the background so it can never keep
 # MariaDB from starting. The helper retries network errors, 408, 429 and 5xx

@@ -24,9 +24,8 @@ RUN apt-get update && apt-get install -y curl gnupg && \
 FROM ubuntu:24.04
 
 ENV MYSQL_ROOT_PASSWORD="mysqlr00t"
-ENV MYSQL_DATABASE test
-ENV MYSQL_USER test
-ENV MYSQL_PASSWORD test
+# No MYSQL_DATABASE, MYSQL_USER or MYSQL_PASSWORD defaults: run.sh creates an
+# extra database or user only when the platform supplies them.
 
 # Install MariaDB 11.4 LTS (latest long-term support release)
 RUN apt-get update && \
