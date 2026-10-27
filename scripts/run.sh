@@ -227,7 +227,9 @@ else
 
 	chown -R mysql:mysql /var/lib/mysql
 
-	mariadb-install-db --user=mysql > /dev/null
+	# --skip-test-db: no sample `test` database, no PUBLIC grants on
+	# `test`/`test\_%` and no anonymous ''@localhost users.
+	mariadb-install-db --user=mysql --skip-test-db > /dev/null
 
 	if [ "$MYSQL_ROOT_PASSWORD" = "" ]; then
 		MYSQL_ROOT_PASSWORD=$(pwgen 16 1)
